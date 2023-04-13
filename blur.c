@@ -1,71 +1,107 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <omp.h>
+#include "omp.h"
 
-#define NUM_THREADS 4
+#define NUM_THREADS 40
 
-int main()
-{
-    FILE *image, *outputImage;
-    image = fopen("sample.bmp", "rb");
-    outputImage = fopen("blurred_%d.bmp", "wb");
-    long ancho, alto;
-    unsigned char r, g, b;
-    unsigned char *ptr;
-    unsigned char xx[54];
-    int cuenta = 0;
+typedef struct {
+    unsigned char b, g, r;
+} pixel;
 
-    // Cabecera
-    for (int i = 0; i < 54; i++)
-    {
-        xx[i] = fgetc(image);
-        fputc(xx[i], outputImage);
+int main(int argc, char *argv[]) {
+
+    FILE *input_file, *output_file, *lecturas;
+    input_file = fopen("sample.bmp","rb");          //Imagen original a transformar
+    float total_r = 0, total_g = 0, total_b = 0;
+
+    int y, x, i, j;
+    // Read BMP header
+    unsigned char header[54];
+    fread(header, sizeof(unsigned char), 54, input_file);
+
+     // Extract image dimensions
+    int width = *(int*)&header[18];
+    int height = *(int*)&header[22];
+
+    // Calculate image padding
+    int padding = 0;
+    while ((width * 3 + padding) % 4 != 0) {
+        padding++;
     }
 
-    // Dimensiones de la imagen
-    ancho = (long)xx[20] * 65536 + (long)xx[19] * 256 + (long)xx[18];
-    alto = (long)xx[24] * 65536 + (long)xx[23] * 256 + (long)xx[22];
-    printf("largo img %li\n", alto);
-    printf("ancho img %li\n", ancho);
 
-    // Memoria para la imagen
-    ptr = (unsigned char *)malloc(alto * ancho * 3 * sizeof(unsigned char));
-    fread(ptr, sizeof(unsigned char), alto * ancho * 3, image);
+    // Allocate memory for image data
+    pixel *image_data = (pixel*)malloc(width *  height * sizeof(pixel));
+    // Read image data
+    fread(image_data, sizeof(pixel), width * height, input_file);
+    int num_output_files = 40; // Number of output files
 
-    for (int k = 0; k < 40; k++)
-    {
-        // Desenfoque
-        omp_set_num_threads(NUM_THREADS);
-#pragma omp parallel for shared(ptr) private(r, g, b) schedule(dynamic)
-        for (int i = 0; i < alto * ancho * 3; i += 3)
-        {
-            if (i < ancho * 3 || i > alto * ancho * 3 - ancho * 3 || i % (ancho * 3) == 0 || i % (ancho * 3) == ancho * 3 - 3)
-            {
-                continue; // no aplicar efecto en bordes
+
+
+    omp_set_num_threads(NUM_THREADS);
+    #pragma omp parallel for shared(image_data) private(output_file, y, x, i, j, total_b, total_r, total_g ) schedule(dynamic)
+    for (int n = 0; n < num_output_files; n++) {
+ 
+        char filename[50];
+        sprintf(filename, "blurred_%d.bmp", n);
+        output_file = fopen(filename, "wb");
+
+        // Blur image
+        int kernel_size = 11 + n*2;
+        float kernel[kernel_size][kernel_size];
+        float kernel_sum = 0;
+        for (int i = 0; i < kernel_size; i++) {
+            for (int j = 0; j < kernel_size; j++) {
+                kernel[i][j] = 1.0 / (float)(kernel_size * kernel_size);
+                kernel_sum += kernel[i][j];
             }
-
-            r = (ptr[i - 3] + ptr[i] + ptr[i + 3] + ptr[i - (ancho * 3)] + ptr[i + (ancho * 3)]) / 5;
-            g = (ptr[i - 2] + ptr[i + 1] + ptr[i + 4] + ptr[i - (ancho * 3) + 1] + ptr[i + (ancho * 3) + 1]) / 5;
-            b = (ptr[i - 1] + ptr[i + 2] + ptr[i + 5] + ptr[i - (ancho * 3) + 2] + ptr[i + (ancho * 3) + 2]) / 5;
-
-            ptr[i - 2] = g;
-            ptr[i - 1] = b;
-            ptr[i] = r;
         }
 
-        // Escribir imagen en archivo
-        char filename[50];
-        sprintf(filename, "blurred_%d.bmp", k);
-        FILE *outputImage = fopen(filename, "wb");
-        fwrite(xx, sizeof(unsigned char), 54, outputImage);
-        fwrite(ptr, sizeof(unsigned char), alto * ancho * 3, outputImage);
-        fclose(outputImage);
-    }
+        // Write BMP header
+        for (int i = 0; i < 54; i++) {
+            fputc(header[i], output_file);
+        }
 
-    // Liberar
-    // Liberar memoria y cerrar archivos
-    free(ptr);
-    fclose(image);
-    fclose(outputImage);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                total_r = 0, total_g = 0, total_b = 0;
+                for (int i = 0; i < kernel_size; i++) {
+                    for (int j = 0; j < kernel_size; j++) {
+                        int nx = x - (kernel_size/2) + j;
+                        int ny = y - (kernel_size/2) + i;
+                        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                            int index = ny * width + nx;
+                            float kernel_value = kernel[i][j] / kernel_sum;
+                            total_r += kernel_value * image_data[index].r;
+                            total_g += kernel_value * image_data[index].g;
+                            total_b += kernel_value * image_data[index].b;
+                        }
+                    }
+                }
+                pixel blurred_pixel = {
+                    (unsigned char)total_b,
+                    (unsigned char)total_g,
+                    (unsigned char)total_r
+                };
+
+                fputc(blurred_pixel.b, output_file);
+                fputc(blurred_pixel.g, output_file);
+                fputc(blurred_pixel.r, output_file);
+
+            }
+            for (int i = 0; i < padding; i++) {
+                fputc(0, output_file);
+            }
+
+            if ((y + 1) % 100 == 0) {
+                printf("Processed %d rows\n", y + 1);
+            }
+        }
+
+        fclose(output_file);
+    }
+        // Clean up
+        free(image_data);
+        fclose(input_file);
     return 0;
 }
